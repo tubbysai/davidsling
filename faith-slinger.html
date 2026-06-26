@@ -1,0 +1,947 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no,viewport-fit=cover">
+<title>Faith Slinger: Stronghold Breaker</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.20.0/matter.min.js"></script>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html,body{width:100vw;height:100dvh;overflow:hidden;background:#120800;
+  user-select:none;-webkit-user-select:none;-webkit-tap-highlight-color:transparent}
+canvas{display:block;position:absolute;top:0;left:0;touch-action:none}
+#rotateOverlay{display:none;position:fixed;inset:0;z-index:100;
+  background:rgba(8,4,0,.96);flex-direction:column;align-items:center;
+  justify-content:center;color:#f0d080;font-family:Georgia,serif;text-align:center;padding:24px}
+#rotateOverlay.show{display:flex}
+#rotateOverlay h2{font-size:clamp(18px,5vw,26px);margin-bottom:10px}
+#rotateOverlay p{font-size:clamp(13px,3vw,16px);color:#c0a060;margin-bottom:22px}
+#rotateOverlay .icon{font-size:clamp(48px,10vw,80px);margin-bottom:14px}
+#continueBtn{background:linear-gradient(180deg,#c8a000,#7a5800);
+  color:#fff8e0;border:2px solid #f0d080;border-radius:8px;
+  padding:14px 28px;font-size:clamp(14px,3vw,18px);font-family:Georgia,serif;
+  cursor:pointer;touch-action:manipulation}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="rotateOverlay">
+  <div class="icon">&#x21BB;</div>
+  <h2>Turn your phone sideways</h2>
+  <p>Faith Slinger plays best in landscape mode.</p>
+  <button id="continueBtn">Continue Anyway</button>
+</div>
+<script>
+// ── 0. POLYFILL roundRect ──────────────────────────────────
+if (!CanvasRenderingContext2D.prototype.roundRect) {
+  CanvasRenderingContext2D.prototype.roundRect = function(x,y,w,h,r){
+    r = Math.min(r, w/2, h/2);
+    this.beginPath();
+    this.moveTo(x+r, y);
+    this.arcTo(x+w,y,   x+w,y+h, r);
+    this.arcTo(x+w,y+h, x,  y+h, r);
+    this.arcTo(x,  y+h, x,  y,   r);
+    this.arcTo(x,  y,   x+w,y,   r);
+    this.closePath();
+    return this;
+  };
+}
+
+// ── 1. CONSTANTS ──────────────────────────────────────────
+const WORLD_W  = 1280;
+const WORLD_H  = 720;
+const FLOOR_Y  = 665;
+const SLING_X  = 175;
+const SLING_Y  = 565;
+const STONE_R  = 17;
+const MAX_PULL = 105;
+// Physics velocity is in px/tick (Matter uses Verlet; 1 tick = 1/60 s)
+// Gravity per tick: G_Y * G_SCALE * (dt_ms)^2  where dt_ms=1000/60, G_SCALE=0.001
+const G_PER_TICK = 1.0 * 0.001 * (1000/60) * (1000/60); // ≈ 0.2778 px/tick²
+
+// ── 2. MATTER ENGINE ──────────────────────────────────────
+const { Engine, World, Bodies, Body, Events } = Matter;
+let engine, world;
+function initEngine() {
+  engine = Engine.create({ gravity:{x:0,y:1}, enableSleeping:true });
+  world  = engine.world;
+}
+
+// ── 3. LEVEL DATA ─────────────────────────────────────────
+// block: {x,y,w,h,type:'stone'|'wood'|'clay',label,isTarget}
+const LEVELS = [
+  { name:'Faith Over Fear',
+    verse:'"When I am afraid, I put my trust in You." — Psalm 56:3',
+    stones:['FAITH','PRAYER','TRUST'],
+    structure:[
+      {x:900,y:FLOOR_Y-30, w:160,h:60, type:'stone',label:'FEAR',       isTarget:true},
+      {x:900,y:FLOOR_Y-100,w:120,h:55, type:'clay', label:'WORRY',      isTarget:true},
+      {x:900,y:FLOOR_Y-170,w:100,h:55, type:'wood', label:'DOUBT',      isTarget:true},
+    ],
+    deco:[
+      {x:795,y:FLOOR_Y-22, w:55,h:44, type:'stone',label:'',isTarget:false},
+      {x:1010,y:FLOOR_Y-22,w:55,h:44, type:'stone',label:'',isTarget:false},
+    ]
+  },
+  { name:'Truth Over Lies',
+    verse:'"Your word is truth." — John 17:17',
+    stones:['TRUTH','WORD','LIGHT','FAITH'],
+    structure:[
+      {x:870,y:FLOOR_Y-30, w:190,h:60, type:'stone',label:'LIES',       isTarget:true},
+      {x:820,y:FLOOR_Y-100,w:85, h:50, type:'wood', label:'CONFUSION',  isTarget:true},
+      {x:930,y:FLOOR_Y-100,w:85, h:50, type:'wood', label:'DECEPTION',  isTarget:true},
+      {x:870,y:FLOOR_Y-162,w:190,h:45, type:'clay', label:'',           isTarget:false},
+    ],
+    deco:[
+      {x:755,y:FLOOR_Y-22, w:50,h:44, type:'stone',label:'',isTarget:false},
+      {x:1060,y:FLOOR_Y-22,w:50,h:44, type:'stone',label:'',isTarget:false},
+    ]
+  },
+  { name:'Humility Over Pride',
+    verse:'"God opposes the proud but gives grace to the humble." — James 4:6',
+    stones:['LOVE','COURAGE','OBEDIENCE','TRUTH'],
+    structure:[
+      {x:820,y:FLOOR_Y-30, w:120,h:60, type:'stone',label:'PRIDE',      isTarget:true},
+      {x:980,y:FLOOR_Y-30, w:120,h:60, type:'stone',label:'SELFISHNESS',isTarget:true},
+      {x:900,y:FLOOR_Y-100,w:280,h:40, type:'wood', label:'',           isTarget:false},
+      {x:900,y:FLOOR_Y-160,w:170,h:52, type:'clay', label:'BOASTING',   isTarget:true},
+      {x:900,y:FLOOR_Y-230,w:90, h:52, type:'wood', label:'',           isTarget:false},
+    ],
+    deco:[]
+  },
+  { name:'Courage Over Temptation',
+    verse:'"Resist the devil, and he will flee from you." — James 4:7',
+    stones:['COURAGE','OBEDIENCE','PRAYER','FAITH'],
+    structure:[
+      {x:810,y:FLOOR_Y-30, w:110,h:60, type:'stone',label:'SIN',        isTarget:true},
+      {x:810,y:FLOOR_Y-105,w:90, h:55, type:'clay', label:'SHORTCUTS',  isTarget:true},
+      {x:960,y:FLOOR_Y-30, w:130,h:60, type:'stone',label:'TEMPTATION', isTarget:true},
+      {x:960,y:FLOOR_Y-100,w:100,h:50, type:'wood', label:'',           isTarget:false},
+      {x:960,y:FLOOR_Y-162,w:80, h:50, type:'clay', label:'',           isTarget:false},
+    ],
+    deco:[{x:745,y:FLOOR_Y-22,w:45,h:44,type:'stone',label:'',isTarget:false}]
+  },
+  { name:"The Battle Is the Lord's",
+    verse:'"The battle is the Lord\'s." — 1 Samuel 17:47',
+    stones:['FAITH','TRUTH','COURAGE','PRAYER','LOVE','WORD'],
+    structure:[
+      // Left tower
+      {x:780,y:FLOOR_Y-32, w:120,h:64, type:'stone',label:'FEAR',       isTarget:true},
+      {x:780,y:FLOOR_Y-108,w:100,h:52, type:'clay', label:'LIES',       isTarget:true},
+      {x:780,y:FLOOR_Y-172,w:80, h:50, type:'wood', label:'',           isTarget:false},
+      {x:780,y:FLOOR_Y-236,w:70, h:52, type:'stone',label:'PRIDE',      isTarget:true},
+      // Right tower
+      {x:990,y:FLOOR_Y-32, w:130,h:64, type:'stone',label:'TEMPTATION', isTarget:true},
+      {x:990,y:FLOOR_Y-108,w:100,h:52, type:'clay', label:'SIN',        isTarget:true},
+      {x:990,y:FLOOR_Y-172,w:80, h:50, type:'wood', label:'',           isTarget:false},
+      // Bridge
+      {x:885,y:FLOOR_Y-210,w:210,h:32, type:'wood', label:'',           isTarget:false},
+      {x:885,y:FLOOR_Y-250,w:130,h:32, type:'clay', label:'',           isTarget:false},
+    ],
+    deco:[
+      {x:695,y:FLOOR_Y-22, w:50,h:44, type:'stone',label:'',isTarget:false},
+      {x:1100,y:FLOOR_Y-22,w:50,h:44, type:'stone',label:'',isTarget:false},
+    ]
+  }
+];
+
+// ── 4. CANVAS / SCALING ───────────────────────────────────
+const canvas = document.getElementById('c');
+const ctx    = canvas.getContext('2d');
+let scale=1, offX=0, offY=0, dpr=1;
+
+function resize() {
+  dpr   = window.devicePixelRatio || 1;
+  scale = Math.min(window.innerWidth/WORLD_W, window.innerHeight/WORLD_H);
+  offX  = (window.innerWidth  - WORLD_W*scale) / 2;
+  offY  = (window.innerHeight - WORLD_H*scale) / 2;
+  canvas.width  = window.innerWidth  * dpr;
+  canvas.height = window.innerHeight * dpr;
+  canvas.style.width  = window.innerWidth  + 'px';
+  canvas.style.height = window.innerHeight + 'px';
+}
+const wx = x => x*scale + offX + shake.x;
+const wy = y => y*scale + offY + shake.y;
+const ws = v => v*scale;
+
+// ── 5. GAME STATE ─────────────────────────────────────────
+let state       = 'menu';   // menu | playing | levelComplete | gameOver
+let levelIdx    = 0;
+let score       = 0;
+let stonesLeft  = 0;
+let stoneIdx    = 0;
+let activeStone = null;
+let inFlight    = false;
+let flightTimer = null;
+let lossDelay   = 0;        // frames after last stone before loss can trigger
+
+let blocks   = [];  // {body,label,isTarget,type,hp,maxHp,startX,startY,defeated,tippedTimer,alpha,w,h}
+let particles= [];
+let clouds   = [];
+let shake    = {x:0,y:0,mag:0};
+let starAnim = 0;
+let starsEarned = 0;
+let buttons  = [];  // [{x,y,w,h,fn}] in world coords
+
+// Sling
+let sling = 'idle';  // idle | pulling | fired
+let pull  = {x:SLING_X, y:SLING_Y};
+let pullD = 0;
+
+// ── 6. LAUNCHER / INPUT ───────────────────────────────────
+function clientToWorld(cx,cy){ return {x:(cx-offX)/scale, y:(cy-offY)/scale}; }
+
+canvas.addEventListener('pointerdown', e=>{
+  e.preventDefault();
+  if(state!=='playing'){ hitButtons(e.clientX,e.clientY); return; }
+  if(sling!=='idle'||inFlight||stonesLeft<=0) return;
+  const w=clientToWorld(e.clientX,e.clientY);
+  const d=Math.hypot(w.x-SLING_X, w.y-SLING_Y);
+  if(d>160) return;
+  canvas.setPointerCapture(e.pointerId);
+  sling='pulling';
+  movePull(w.x,w.y);
+},{passive:false});
+
+canvas.addEventListener('pointermove', e=>{
+  e.preventDefault();
+  if(sling!=='pulling') return;
+  const w=clientToWorld(e.clientX,e.clientY);
+  movePull(w.x,w.y);
+},{passive:false});
+
+canvas.addEventListener('pointerup',   onRelease, {passive:false});
+canvas.addEventListener('pointercancel',onRelease,{passive:false});
+
+function onRelease(e){
+  e.preventDefault();
+  if(sling==='pulling') launchStone();
+}
+
+function movePull(wx_, wy_){
+  let dx=wx_-SLING_X, dy=wy_-SLING_Y;
+  const d=Math.hypot(dx,dy);
+  if(d>MAX_PULL){dx*=MAX_PULL/d; dy*=MAX_PULL/d;}
+  pull.x=SLING_X+dx; pull.y=SLING_Y+dy;
+  pullD=Math.hypot(dx,dy);
+}
+
+function launchStone(){
+  if(stonesLeft<=0){sling='idle';return;}
+  const lvl=LEVELS[levelIdx];
+  // Force vector: opposite of pull direction
+  const dx=SLING_X-pull.x, dy=SLING_Y-pull.y;
+  const power=pullD/MAX_PULL;
+  // Velocity in pixels/tick (Matter Verlet). Scale: 0.16 gives ~17 px/tick at full pull
+  const SPEED=0.155;
+  const vx=dx*SPEED*power;
+  const vy=dy*SPEED*power;
+
+  const body=Bodies.circle(SLING_X,SLING_Y,STONE_R,{
+    density:0.018, restitution:0.25, friction:0.4, frictionAir:0.005, label:'stone'
+  });
+  Body.setVelocity(body,{x:vx,y:vy});
+  World.add(world,body);
+  body.gameWord = lvl.stones[stoneIdx]||'FAITH';
+  body.trail    = [];
+  activeStone   = body;
+  inFlight      = true;
+  sling         = 'fired';
+  stonesLeft--;
+  stoneIdx++;
+  lossDelay     = 0;
+
+  spawnDust(SLING_X,SLING_Y,10,'#c8a060');
+
+  if(flightTimer) clearTimeout(flightTimer);
+  flightTimer=setTimeout(()=>endFlight(),5000);
+}
+
+function endFlight(){
+  if(flightTimer){clearTimeout(flightTimer);flightTimer=null;}
+  if(activeStone){World.remove(world,activeStone);activeStone=null;}
+  inFlight=false;
+  sling='idle';
+  pull={x:SLING_X,y:SLING_Y};
+  pullD=0;
+}
+
+// ── 7. PHYSICS BODIES ─────────────────────────────────────
+function addBlock(bd){
+  const density= bd.type==='stone'?0.003 : bd.type==='wood'?0.0018 : 0.0025;
+  const body=Bodies.rectangle(bd.x,bd.y,bd.w,bd.h,{
+    friction:0.85,frictionStatic:0.9,restitution:0.08,
+    density, label:bd.label||'block', sleepThreshold:60
+  });
+  World.add(world,body);
+  const maxHp= bd.isTarget ? (bd.type==='stone'?130:bd.type==='wood'?85:105) : 9999;
+  blocks.push({body,label:bd.label,isTarget:bd.isTarget,type:bd.type,
+    hp:maxHp,maxHp,startX:bd.x,startY:bd.y,
+    defeated:false,tippedTimer:0,alpha:1,w:bd.w,h:bd.h});
+}
+
+function addStaticBodies(){
+  const T=80;
+  World.add(world,[
+    Bodies.rectangle(WORLD_W/2, FLOOR_Y+T/2,   WORLD_W*3,T,   {isStatic:true,label:'floor',friction:0.9,restitution:0.04}),
+    Bodies.rectangle(-T/2,      WORLD_H/2,      T,WORLD_H*3,   {isStatic:true,label:'wall'}),
+    Bodies.rectangle(WORLD_W+T/2,WORLD_H/2,     T,WORLD_H*3,   {isStatic:true,label:'wall'}),
+    Bodies.rectangle(WORLD_W/2, -T/2,           WORLD_W*3,T,   {isStatic:true,label:'ceiling'}),
+  ]);
+}
+
+// ── 8. LEVEL BUILD ────────────────────────────────────────
+function buildLevel(idx){
+  World.clear(world); Engine.clear(engine);
+  engine.gravity.y=1;
+  blocks=[];particles=[];
+  activeStone=null;inFlight=false;sling='idle';
+  pull={x:SLING_X,y:SLING_Y};pullD=0;lossDelay=0;
+  if(flightTimer){clearTimeout(flightTimer);flightTimer=null;}
+  Events.off(engine,'collisionStart');
+
+  addStaticBodies();
+  const lvl=LEVELS[idx];
+  stonesLeft=lvl.stones.length; stoneIdx=0; score=0;
+  for(const b of lvl.structure) addBlock(b);
+  for(const b of (lvl.deco||[])) addBlock(b);
+
+  Events.on(engine,'collisionStart',onColl);
+}
+
+function onColl(ev){
+  for(const p of ev.pairs){
+    const {bodyA,bodyB}=p;
+    const stoneA=bodyA.label==='stone', stoneB=bodyB.label==='stone';
+    if(!stoneA&&!stoneB) continue;
+    const blockBody=stoneA?bodyB:bodyA;
+    const speed=Math.hypot(bodyA.velocity.x-bodyB.velocity.x, bodyA.velocity.y-bodyB.velocity.y);
+    if(speed<2) continue;
+    const cx=(bodyA.position.x+bodyB.position.x)/2;
+    const cy=(bodyA.position.y+bodyB.position.y)/2;
+    spawnDust(cx,cy,Math.ceil(speed*0.8),'#c8a060');
+    if(speed>7){ shake.mag=Math.min(14,speed*0.9); }
+    const entry=blocks.find(e=>e.body===blockBody&&e.isTarget&&!e.defeated);
+    if(entry){
+      entry.hp-=speed*5;
+      spawnDebris(cx,cy,Math.ceil(speed*0.6),entry.type);
+      if(entry.hp<=0) defeat(entry);
+    }
+  }
+}
+
+function defeat(e){
+  if(e.defeated) return;
+  e.defeated=true; e.hp=0;
+  score+=300;
+  spawnSparkle(e.body.position.x,e.body.position.y);
+  spawnDebris(e.body.position.x,e.body.position.y,12,e.type);
+}
+
+// ── 9. WIN / LOSS ─────────────────────────────────────────
+function checkTargets(){
+  for(const t of blocks){
+    if(!t.isTarget||t.defeated) continue;
+    const {x,y}=t.body.position;
+    if(y>FLOOR_Y+60){ defeat(t); continue; }
+    const dist=Math.hypot(x-t.startX, y-t.startY);
+    if(dist>400){ defeat(t); continue; }
+    const ang=Math.abs(t.body.angle%(Math.PI*2));
+    const norm=ang>Math.PI?Math.PI*2-ang:ang;
+    if(norm>1.1){ t.tippedTimer=(t.tippedTimer||0)+1; if(t.tippedTimer>90) defeat(t); }
+    else t.tippedTimer=0;
+  }
+  return blocks.filter(b=>b.isTarget).every(b=>b.defeated);
+}
+
+// ── 10. PARTICLES ─────────────────────────────────────────
+function spawnDust(x,y,n,col){
+  for(let i=0;i<n;i++){
+    const a=Math.random()*Math.PI*2, s=1+Math.random()*3;
+    particles.push({x,y,vx:Math.cos(a)*s,vy:Math.sin(a)*s-1,
+      life:1,decay:.032+Math.random()*.04,sz:2+Math.random()*4,col,type:'d'});
+  }
+}
+function spawnDebris(x,y,n,type){
+  const cols={stone:'#999',wood:'#8B5E2A',clay:'#B05030'};
+  const col=cols[type]||'#aaa';
+  for(let i=0;i<n;i++){
+    const a=-Math.PI+Math.random()*Math.PI, s=2+Math.random()*5;
+    particles.push({x,y,vx:Math.cos(a)*s,vy:Math.sin(a)*s-2,
+      life:1,decay:.026+Math.random()*.03,sz:2+Math.random()*5,col,type:'db'});
+  }
+}
+function spawnSparkle(x,y){
+  for(let i=0;i<14;i++){
+    const a=(i/14)*Math.PI*2, s=2+Math.random()*4;
+    particles.push({x,y,vx:Math.cos(a)*s,vy:Math.sin(a)*s,
+      life:1,decay:.02+Math.random()*.025,sz:3+Math.random()*4,col:'#FFE060',type:'sp'});
+  }
+}
+function tickParticles(){
+  for(let i=particles.length-1;i>=0;i--){
+    const p=particles[i];
+    p.x+=p.vx; p.y+=p.vy; p.vy+=0.15; p.vx*=.98; p.life-=p.decay;
+    if(p.life<=0) particles.splice(i,1);
+  }
+}
+
+// ── 11. DRAW HELPERS ─────────────────────────────────────
+
+function drawSky(){
+  const g=ctx.createLinearGradient(wx(0),wy(0),wx(0),wy(WORLD_H));
+  g.addColorStop(0,'#100618'); g.addColorStop(.28,'#3d1500');
+  g.addColorStop(.6,'#b54a10'); g.addColorStop(.85,'#e07c18');
+  g.addColorStop(1,'#f0b048');
+  ctx.fillStyle=g; ctx.fillRect(wx(0),wy(0),ws(WORLD_W),ws(WORLD_H));
+}
+
+function drawSun(){
+  const sx=wx(920),sy=wy(175);
+  // Rays
+  ctx.save(); ctx.globalAlpha=.055;
+  for(let i=0;i<12;i++){
+    const a=(i/12)*Math.PI*2;
+    ctx.strokeStyle='#FFE0A0'; ctx.lineWidth=ws(28);
+    ctx.beginPath(); ctx.moveTo(sx,sy);
+    ctx.lineTo(sx+Math.cos(a)*ws(650),sy+Math.sin(a)*ws(650)); ctx.stroke();
+  }
+  ctx.restore();
+  // Disc
+  ctx.save();
+  const sg=ctx.createRadialGradient(sx,sy,ws(4),sx,sy,ws(58));
+  sg.addColorStop(0,'#FFFAC0'); sg.addColorStop(.5,'#FFB040'); sg.addColorStop(1,'rgba(255,100,0,0)');
+  ctx.fillStyle=sg; ctx.globalAlpha=.88;
+  ctx.beginPath(); ctx.arc(sx,sy,ws(58),0,Math.PI*2); ctx.fill();
+  ctx.restore();
+}
+
+function drawClouds(t){
+  ctx.save(); ctx.globalAlpha=.22; ctx.fillStyle='#FFD098';
+  for(const c of clouds){
+    const cx=wx(((c.x+t*c.spd*.0007)%(WORLD_W+220))-110), cy=wy(c.y), r=ws(c.r);
+    ctx.beginPath(); ctx.ellipse(cx,cy,r*2,r,0,0,Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(cx+r*.8,cy-r*.35,r*1.2,r*.65,0,0,Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(cx-r*.6,cy-.25*r,r,r*.55,0,0,Math.PI*2); ctx.fill();
+  }
+  ctx.restore();
+}
+
+function drawHills(){
+  // Distant hills
+  ctx.save(); ctx.fillStyle='#321208'; ctx.globalAlpha=.85;
+  ctx.beginPath();
+  ctx.moveTo(wx(0),wy(WORLD_H));
+  ctx.lineTo(wx(0),wy(410));
+  ctx.bezierCurveTo(wx(200),wy(330),wx(350),wy(380),wx(500),wy(410));
+  ctx.bezierCurveTo(wx(650),wy(340),wx(820),wy(390),wx(1000),wy(345));
+  ctx.bezierCurveTo(wx(1100),wy(330),wx(1200),wy(370),wx(WORLD_W),wy(390));
+  ctx.lineTo(wx(WORLD_W),wy(WORLD_H));
+  ctx.fill();
+  // Ground
+  ctx.globalAlpha=1;
+  const gg=ctx.createLinearGradient(0,wy(FLOOR_Y-35),0,wy(WORLD_H));
+  gg.addColorStop(0,'#8B5E30'); gg.addColorStop(.25,'#6B4020'); gg.addColorStop(1,'#2a1000');
+  ctx.fillStyle=gg;
+  ctx.fillRect(wx(0),wy(FLOOR_Y-18),ws(WORLD_W),ws(WORLD_H-FLOOR_Y+18));
+  // Ground lines
+  ctx.globalAlpha=.28; ctx.strokeStyle='#5a3010'; ctx.lineWidth=ws(1);
+  for(let i=0;i<7;i++){
+    const ly=FLOOR_Y+i*13;
+    ctx.beginPath(); ctx.moveTo(wx(0),wy(ly)); ctx.lineTo(wx(WORLD_W),wy(ly)); ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function drawHaze(){
+  ctx.save();
+  const hg=ctx.createLinearGradient(0,wy(FLOOR_Y-90),0,wy(FLOOR_Y));
+  hg.addColorStop(0,'rgba(160,80,20,0)'); hg.addColorStop(1,'rgba(160,80,20,.14)');
+  ctx.fillStyle=hg; ctx.fillRect(wx(0),wy(FLOOR_Y-90),ws(WORLD_W),ws(90));
+  ctx.restore();
+}
+
+function drawBlock(e){
+  if(e.alpha<=0) return;
+  const {x,y}=e.body.position, ang=e.body.angle;
+  ctx.save();
+  ctx.globalAlpha=e.alpha;
+  ctx.translate(wx(x),wy(y));
+  ctx.rotate(ang);
+  const sw=ws(e.w),sh=ws(e.h);
+
+  // Body gradient
+  let g;
+  if(e.type==='stone'){
+    g=ctx.createLinearGradient(-sw/2,-sh/2,sw/2,sh/2);
+    g.addColorStop(0,'#b0b0b0'); g.addColorStop(.5,'#888'); g.addColorStop(1,'#5a5a5a');
+  } else if(e.type==='wood'){
+    g=ctx.createLinearGradient(-sw/2,-sh/2,sw/2,sh/2);
+    g.addColorStop(0,'#c08030'); g.addColorStop(.5,'#8B5020'); g.addColorStop(1,'#4a2808');
+  } else {
+    g=ctx.createLinearGradient(-sw/2,-sh/2,sw/2,sh/2);
+    g.addColorStop(0,'#c86040'); g.addColorStop(.5,'#a04028'); g.addColorStop(1,'#782818');
+  }
+  ctx.fillStyle=g;
+  ctx.roundRect(-sw/2,-sh/2,sw,sh,ws(4));
+  ctx.fill();
+
+  // Highlight edge
+  ctx.strokeStyle='rgba(255,255,255,.18)'; ctx.lineWidth=ws(2);
+  ctx.roundRect(-sw/2,-sh/2,sw,sh,ws(4)); ctx.stroke();
+  // Shadow edge
+  ctx.strokeStyle='rgba(0,0,0,.3)'; ctx.lineWidth=ws(1.5);
+  ctx.roundRect(-sw/2+ws(1),-sh/2+ws(1),sw-ws(2),sh-ws(2),ws(3)); ctx.stroke();
+
+  // Texture
+  ctx.globalAlpha=e.alpha*.22; ctx.strokeStyle=e.type==='wood'?'#3a1800':'#444'; ctx.lineWidth=ws(1);
+  if(e.type==='wood'){
+    for(let i=1;i<5;i++){ const lx=-sw/2+(sw/5)*i; ctx.beginPath();ctx.moveTo(lx,-sh/2);ctx.lineTo(lx,sh/2);ctx.stroke(); }
+  } else if(e.type==='stone'){
+    ctx.beginPath();ctx.moveTo(-sw/3,-sh/2);ctx.lineTo(-sw/5,0);ctx.lineTo(-sw/2.5,sh/2);ctx.stroke();
+    ctx.beginPath();ctx.moveTo(sw/3,-sh/3);ctx.lineTo(sw/4,sh/3);ctx.stroke();
+  } else {
+    ctx.beginPath();ctx.moveTo(-sw/2,-sh*0.1);ctx.lineTo(sw/2,-sh*0.1);ctx.stroke();
+    ctx.beginPath();ctx.moveTo(-sw/2, sh*0.1);ctx.lineTo(sw/2, sh*0.1);ctx.stroke();
+  }
+
+  // Damage cracks
+  if(e.isTarget&&e.hp<e.maxHp){
+    const dr=1-e.hp/e.maxHp;
+    ctx.globalAlpha=e.alpha*dr*.85; ctx.strokeStyle='#000'; ctx.lineWidth=ws(1.5);
+    const nc=Math.floor(dr*5)+1;
+    for(let c=0;c<nc;c++){
+      const cx=-sw/2+sw*(c+1)/(nc+1);
+      ctx.beginPath();ctx.moveTo(cx,-sh/3);
+      ctx.lineTo(cx+(c%2?.18:-.18)*sw,sh*.1+c*ws(4));
+      ctx.lineTo(cx+(c%2?-.1:.15)*sw,sh/2);ctx.stroke();
+    }
+  }
+
+  // Defeated glow
+  if(e.defeated){
+    ctx.globalAlpha=e.alpha*.5; ctx.strokeStyle='#FFE060'; ctx.lineWidth=ws(3);
+    ctx.roundRect(-sw/2,-sh/2,sw,sh,ws(5)); ctx.stroke();
+  }
+
+  // Label
+  if(e.label){
+    ctx.globalAlpha=e.alpha;
+    const fs=ws(Math.max(8,Math.min(15,Math.min(e.w,e.h)*.28)));
+    ctx.font=`bold ${fs}px Georgia,serif`;
+    ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.lineJoin='round'; ctx.strokeStyle='rgba(0,0,0,.85)'; ctx.lineWidth=ws(3.5);
+    ctx.strokeText(e.label,0,0);
+    ctx.fillStyle=e.isTarget?'#FFE090':'#FFF8E0'; ctx.fillText(e.label,0,0);
+  }
+  ctx.restore();
+}
+
+function drawStone(body){
+  if(!body) return;
+  const {x,y}=body.position, ang=body.angle;
+  // Trail
+  if(body.trail&&body.trail.length>1){
+    ctx.save();
+    for(let i=1;i<body.trail.length;i++){
+      const t=body.trail[i], f=i/body.trail.length;
+      ctx.globalAlpha=f*.25; ctx.fillStyle='#FFD060';
+      ctx.beginPath();ctx.arc(wx(t.x),wy(t.y),ws(STONE_R*f*.7),0,Math.PI*2);ctx.fill();
+    }
+    ctx.restore();
+  }
+  ctx.save(); ctx.translate(wx(x),wy(y)); ctx.rotate(ang);
+  const r=ws(STONE_R);
+  const sg=ctx.createRadialGradient(-r*.3,-r*.3,r*.08,0,0,r);
+  sg.addColorStop(0,'#EED090'); sg.addColorStop(.5,'#C0A060'); sg.addColorStop(1,'#7a5a38');
+  ctx.fillStyle=sg; ctx.beginPath(); ctx.arc(0,0,r,0,Math.PI*2); ctx.fill();
+  ctx.strokeStyle='rgba(255,255,255,.28)'; ctx.lineWidth=ws(1.5);
+  ctx.beginPath(); ctx.arc(0,0,r*.82,0,Math.PI*2); ctx.stroke();
+  const word=body.gameWord||'FAITH';
+  const fs=ws(Math.max(5,Math.min(10,(STONE_R*2)/word.length*1.15)));
+  ctx.font=`bold ${fs}px Georgia,serif`;
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.lineJoin='round'; ctx.strokeStyle='rgba(0,0,0,.7)'; ctx.lineWidth=ws(2.5);
+  ctx.strokeText(word,0,0); ctx.fillStyle='#FFFCE8'; ctx.fillText(word,0,0);
+  ctx.restore();
+}
+
+function drawParticles(){
+  for(const p of particles){
+    ctx.save(); ctx.globalAlpha=p.life;
+    ctx.fillStyle=p.col;
+    if(p.type==='sp'){ ctx.shadowColor='#FFD040'; ctx.shadowBlur=ws(5); }
+    ctx.beginPath(); ctx.arc(wx(p.x),wy(p.y),ws(p.sz*.5),0,Math.PI*2); ctx.fill();
+    ctx.restore();
+  }
+}
+
+// Y-fork sling
+function drawSling(){
+  const LX=wx(SLING_X), LY=wy(SLING_Y);
+  const FW=ws(13), AL=ws(88), FS=ws(38);
+  ctx.save(); ctx.translate(LX,LY);
+  // Handle
+  const hg=ctx.createLinearGradient(-FW/2,0,FW/2,0);
+  hg.addColorStop(0,'#6B3A10'); hg.addColorStop(.5,'#9B6030'); hg.addColorStop(1,'#4a2000');
+  ctx.fillStyle=hg;
+  ctx.roundRect(-FW/2,0,FW,ws(115),ws(5)); ctx.fill();
+  // Arms
+  woodArm(ctx,0,0,-FS,-AL,FW);
+  woodArm(ctx,0,0, FS,-AL,FW);
+  ctx.restore();
+
+  // Pouch position
+  let pX,pY;
+  if(sling==='pulling'){ pX=wx(pull.x); pY=wy(pull.y); }
+  else{ pX=wx(SLING_X); pY=wy(SLING_Y)-AL+ws(4); }
+
+  // Bands
+  const ltX=wx(SLING_X)-FS, ltY=wy(SLING_Y)-AL;
+  const rtX=wx(SLING_X)+FS, rtY=wy(SLING_Y)-AL;
+  ctx.save();
+  ctx.strokeStyle='#4a2800'; ctx.lineWidth=ws(4); ctx.lineCap='round';
+  ctx.beginPath(); ctx.moveTo(ltX,ltY); ctx.lineTo(pX,pY); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(rtX,rtY); ctx.lineTo(pX,pY); ctx.stroke();
+  ctx.strokeStyle='rgba(150,90,30,.5)'; ctx.lineWidth=ws(2);
+  ctx.beginPath(); ctx.moveTo(ltX,ltY); ctx.lineTo(pX,pY); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(rtX,rtY); ctx.lineTo(pX,pY); ctx.stroke();
+  // Pouch
+  ctx.fillStyle='#5a3010'; ctx.beginPath();
+  ctx.ellipse(pX,pY,ws(13),ws(8),0,0,Math.PI*2); ctx.fill();
+  ctx.restore();
+
+  // Stone in pouch when idle
+  if(sling!=='fired'&&stonesLeft>0&&state==='playing'){
+    const word=LEVELS[levelIdx].stones[stoneIdx]||'FAITH';
+    ctx.save(); ctx.translate(pX,pY);
+    const r=ws(STONE_R*.88);
+    const sg=ctx.createRadialGradient(-r*.3,-r*.3,r*.08,0,0,r);
+    sg.addColorStop(0,'#EED090'); sg.addColorStop(.5,'#C0A060'); sg.addColorStop(1,'#7a5a38');
+    ctx.fillStyle=sg; ctx.beginPath(); ctx.arc(0,0,r,0,Math.PI*2); ctx.fill();
+    const fs=ws(Math.max(5,Math.min(10,(STONE_R*2)/word.length*1.1)));
+    ctx.font=`bold ${fs}px Georgia,serif`;
+    ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.strokeStyle='rgba(0,0,0,.7)'; ctx.lineWidth=ws(2.5); ctx.strokeText(word,0,0);
+    ctx.fillStyle='#FFFCE8'; ctx.fillText(word,0,0);
+    ctx.restore();
+  }
+}
+
+function woodArm(ctx,x1,y1,x2,y2,w){
+  const a=Math.atan2(y2-y1,x2-x1), len=Math.hypot(x2-x1,y2-y1);
+  ctx.save(); ctx.translate(x1,y1); ctx.rotate(a);
+  const ag=ctx.createLinearGradient(0,-w/2,0,w/2);
+  ag.addColorStop(0,'#9B6030'); ag.addColorStop(.5,'#7B4820'); ag.addColorStop(1,'#4a2000');
+  ctx.fillStyle=ag; ctx.roundRect(0,-w/2,len,w,w/2); ctx.fill();
+  ctx.restore();
+}
+
+function drawArc(){
+  if(sling!=='pulling'||pullD<18) return;
+  const dx=SLING_X-pull.x, dy=SLING_Y-pull.y;
+  const power=pullD/MAX_PULL;
+  const SPEED=0.155;
+  let pvx=dx*SPEED*power, pvy=dy*SPEED*power;
+  let px=SLING_X, py=SLING_Y;
+  const FA=1-0.005;
+  ctx.save();
+  ctx.setLineDash([ws(5),ws(8)]); ctx.strokeStyle='rgba(255,220,100,.6)';
+  ctx.lineWidth=ws(2.5); ctx.lineCap='round';
+  ctx.beginPath(); ctx.moveTo(wx(px),wy(py));
+  for(let t=0;t<90;t++){
+    pvx*=FA; pvy*=FA; pvy+=G_PER_TICK;
+    px+=pvx; py+=pvy;
+    if(py>FLOOR_Y+20||px<0||px>WORLD_W) break;
+    ctx.lineTo(wx(px),wy(py));
+  }
+  ctx.stroke(); ctx.restore();
+}
+
+// ── 12. HUD ───────────────────────────────────────────────
+function drawHUD(){
+  if(state!=='playing') return;
+  buttons=[];
+  const lvl=LEVELS[levelIdx];
+
+  // Left info panel
+  ctx.save();
+  ctx.fillStyle='rgba(0,0,0,.55)'; ctx.roundRect(wx(10),wy(8),ws(385),ws(58),ws(8)); ctx.fill();
+  ctx.fillStyle='#FFE090'; ctx.font=`bold ${ws(15)}px Georgia,serif`;
+  ctx.textAlign='left'; ctx.textBaseline='middle';
+  ctx.fillText(`Level ${levelIdx+1}: ${lvl.name}`,wx(22),wy(22));
+  ctx.fillStyle='#FFD060'; ctx.font=`${ws(13)}px Georgia,serif`;
+  ctx.fillText(`Score: ${score}`,wx(22),wy(46));
+
+  // Center stones panel
+  ctx.fillStyle='rgba(0,0,0,.55)'; ctx.roundRect(wx(405),wy(8),ws(240),ws(58),ws(8)); ctx.fill();
+  ctx.fillStyle='#FFE090'; ctx.font=`bold ${ws(14)}px Georgia,serif`;
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.fillText(`Stones: ${stonesLeft}`,wx(525),wy(22));
+  const nw=stonesLeft>0?lvl.stones[stoneIdx]||'':'';
+  ctx.fillStyle='#FFC060'; ctx.font=`${ws(12)}px Georgia,serif`;
+  ctx.fillText(nw?`Next: ${nw}`:'',wx(525),wy(46));
+  ctx.restore();
+
+  // Buttons
+  hudBtn('Restart',WORLD_W-182,8,85,52,()=>{ initEngine(); buildLevel(levelIdx); state='playing'; });
+  hudBtn('Menu',   WORLD_W-88, 8,78,52,()=>{ state='menu'; });
+}
+
+function hudBtn(label,x,y,w,h,fn){
+  ctx.save();
+  const bx=wx(x),by=wy(y),bw=ws(w),bh=ws(h);
+  const g=ctx.createLinearGradient(bx,by,bx,by+bh);
+  g.addColorStop(0,'#c8a000'); g.addColorStop(1,'#7a5800');
+  ctx.fillStyle=g; ctx.roundRect(bx,by,bw,bh,ws(6)); ctx.fill();
+  ctx.strokeStyle='#FFD060'; ctx.lineWidth=ws(2); ctx.roundRect(bx,by,bw,bh,ws(6)); ctx.stroke();
+  ctx.fillStyle='#FFF8E0'; ctx.font=`bold ${ws(13)}px Georgia,serif`;
+  ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.fillText(label,bx+bw/2,by+bh/2);
+  ctx.restore();
+  buttons.push({x,y,w,h,fn});
+}
+
+function hitButtons(cx,cy){
+  const w=clientToWorld(cx,cy);
+  for(const b of buttons) if(w.x>=b.x&&w.x<=b.x+b.w&&w.y>=b.y&&w.y<=b.y+b.h){ b.fn(); return; }
+}
+
+// ── 13. MODALS ────────────────────────────────────────────
+// Modal drawing uses raw canvas coords (no shake) for stability
+
+function modalBg(x,y,w,h){  // all in world coords
+  const bx=x*scale+offX, by=y*scale+offY, bw=w*scale, bh=h*scale;
+  ctx.save();
+  const g=ctx.createLinearGradient(bx,by,bx,by+bh);
+  g.addColorStop(0,'#200e00'); g.addColorStop(1,'#080400');
+  ctx.fillStyle=g; ctx.roundRect(bx,by,bw,bh,ws(16)); ctx.fill();
+  ctx.strokeStyle='#FFD060'; ctx.lineWidth=ws(3); ctx.roundRect(bx,by,bw,bh,ws(16)); ctx.stroke();
+  ctx.restore();
+}
+
+function modalText(text,x,y,size,col,align='center'){
+  ctx.save(); ctx.font=`${size}px Georgia,serif`;
+  ctx.fillStyle=col; ctx.textAlign=align; ctx.textBaseline='middle';
+  const px=x*scale+offX, py=y*scale+offY;
+  ctx.fillText(text,px,py);
+  ctx.restore();
+}
+
+function modalBtn(label,x,y,w,h,fn){
+  const bx=x*scale+offX, by=y*scale+offY, bw=w*scale, bh=h*scale;
+  ctx.save();
+  const g=ctx.createLinearGradient(bx,by,bx,by+bh);
+  g.addColorStop(0,'#c8a000'); g.addColorStop(1,'#7a5800');
+  ctx.fillStyle=g; ctx.roundRect(bx,by,bw,bh,ws(8)); ctx.fill();
+  ctx.strokeStyle='#FFD060'; ctx.lineWidth=ws(2); ctx.roundRect(bx,by,bw,bh,ws(8)); ctx.stroke();
+  ctx.fillStyle='#FFF8E0'; ctx.font=`bold ${ws(14)}px Georgia,serif`;
+  ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.fillText(label,bx+bw/2,by+bh/2);
+  ctx.restore();
+  buttons.push({x,y,w,h,fn});
+}
+
+function wrapModalText(text,x,y,maxW,lineH){
+  const words=text.split(' ');
+  let line='', ly=y, fs=ctx.font;
+  ctx.save(); ctx.font=fs; ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.fillStyle='#A08060';
+  const mwPx=maxW*scale;
+  for(const word of words){
+    const test=line+word+' ';
+    if(ctx.measureText(test).width>mwPx&&line){
+      ctx.fillText(line.trim(),x*scale+offX,ly*scale+offY);
+      line=word+' '; ly+=lineH;
+    } else line=test;
+  }
+  ctx.fillText(line.trim(),x*scale+offX,ly*scale+offY);
+  ctx.restore();
+}
+
+function drawStar5(cx,cy,r,filled){
+  ctx.save();
+  if(filled){ ctx.shadowColor='#FFD040'; ctx.shadowBlur=ws(12); ctx.fillStyle='#FFD040'; }
+  else { ctx.fillStyle='#444'; }
+  ctx.beginPath();
+  for(let i=0;i<10;i++){
+    const a=(i*Math.PI/5)-Math.PI/2;
+    const rad=i%2===0?r:r*.42;
+    if(i===0)ctx.moveTo(cx+Math.cos(a)*rad,cy+Math.sin(a)*rad);
+    else ctx.lineTo(cx+Math.cos(a)*rad,cy+Math.sin(a)*rad);
+  }
+  ctx.closePath(); ctx.fill(); ctx.restore();
+}
+
+function calcStars(){
+  const unused=stonesLeft;
+  if(unused>=2||score>=800) return 3;
+  if(unused>=1||score>=500) return 2;
+  return 1;
+}
+
+function drawLevelComplete(){
+  buttons=[];
+  // Dim background
+  ctx.save(); ctx.fillStyle='rgba(0,0,0,.7)';
+  ctx.fillRect(0,0,canvas.width,canvas.height); ctx.restore();
+
+  const cx=WORLD_W/2, mw=550, mh=420;
+  modalBg(cx-mw/2,130,mw,mh);
+
+  modalText('Stronghold Broken!',cx,178,`bold ${ws(32)}px`,'#FFE080');
+  starsEarned=calcStars();
+  const ar=ws(30), sp=90;
+  for(let i=0;i<3;i++){
+    const delay=i*.3, t=Math.max(0,Math.min(1,(starAnim-delay)*2.5));
+    const scx=(cx-sp+i*sp)*scale+offX, scy=240*scale+offY;
+    ctx.save(); ctx.translate(scx,scy); ctx.scale(t,t);
+    drawStar5(0,0,ar,i<starsEarned); ctx.restore();
+  }
+  modalText(`Score: ${score}`,cx,288,`bold ${ws(20)}px`,'#FFC040');
+  const msgs=['Well done! Keep trusting God!','Your faith moves mountains!','God\'s Word never fails!','Courage in Christ!','Victory belongs to the Lord!'];
+  modalText(msgs[levelIdx%5],cx,320,`${ws(14)}px`,'#C0A070');
+
+  ctx.save(); ctx.font=`italic ${ws(12)}px Georgia,serif`;
+  wrapModalText(BIBLE_VERSES[levelIdx],cx,348,mw-60,17);
+  ctx.restore();
+
+  const btnY=390;
+  if(levelIdx<LEVELS.length-1)
+    modalBtn('Next Level',cx-160,btnY,140,50,()=>{ levelIdx++; initEngine(); buildLevel(levelIdx); state='playing'; starAnim=0; });
+  modalBtn('Replay',cx+8,btnY,130,50,()=>{ initEngine(); buildLevel(levelIdx); state='playing'; starAnim=0; });
+  modalBtn('Menu',cx+8,btnY+62,130,46,()=>{ state='menu'; starAnim=0; });
+}
+
+function drawGameOver(){
+  buttons=[];
+  ctx.save(); ctx.fillStyle='rgba(0,0,0,.75)';
+  ctx.fillRect(0,0,canvas.width,canvas.height); ctx.restore();
+
+  const cx=WORLD_W/2, mw=460, mh=290;
+  modalBg(cx-mw/2,215,mw,mh);
+  modalText('Try Again!',cx,258,`bold ${ws(34)}px`,'#FF9040');
+  modalText('Don\'t give up — faith perseveres!',cx,302,`${ws(15)}px`,'#C08060');
+  modalBtn('Restart Level',cx-125,345,220,56,()=>{ initEngine(); buildLevel(levelIdx); state='playing'; });
+  modalBtn('Menu',cx+115,345,100,56,()=>{ state='menu'; });
+}
+
+function drawMenu(){
+  buttons=[];
+  drawSky(); drawSun(); drawClouds(performance.now()); drawHills(); drawHaze();
+
+  const cx=WORLD_W/2, pw=600, ph=455;
+  const px=cx-pw/2, py=105;
+  ctx.save();
+  ctx.fillStyle='rgba(0,0,0,.62)'; ctx.roundRect(wx(px),wy(py),ws(pw),ws(ph),ws(16)); ctx.fill();
+  ctx.restore();
+
+  // Title
+  ctx.save();
+  ctx.font=`bold ${ws(56)}px Georgia,serif`; ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.lineJoin='round'; ctx.strokeStyle='#8B4000'; ctx.lineWidth=ws(7); ctx.strokeText('Faith Slinger',wx(cx),wy(195));
+  ctx.fillStyle='#FFE080'; ctx.fillText('Faith Slinger',wx(cx),wy(195));
+  ctx.font=`bold ${ws(22)}px Georgia,serif`; ctx.fillStyle='#FFC060';
+  ctx.fillText('Stronghold Breaker',wx(cx),wy(248));
+  ctx.font=`${ws(14)}px Georgia,serif`; ctx.fillStyle='#C0A060';
+  ctx.fillText('Launch stones of faith to break fear, lies, pride, and temptation.',wx(cx),wy(296));
+  ctx.restore();
+
+  // Play button
+  const pbx=wx(cx-145),pby=wy(338),pbw=ws(290),pbh=ws(68);
+  ctx.save();
+  const pg=ctx.createLinearGradient(pbx,pby,pbx,pby+pbh);
+  pg.addColorStop(0,'#FFB020'); pg.addColorStop(1,'#8B5500');
+  ctx.fillStyle=pg; ctx.roundRect(pbx,pby,pbw,pbh,ws(12)); ctx.fill();
+  ctx.strokeStyle='#FFE060'; ctx.lineWidth=ws(3); ctx.roundRect(pbx,pby,pbw,pbh,ws(12)); ctx.stroke();
+  ctx.fillStyle='#FFF8E0'; ctx.font=`bold ${ws(22)}px Georgia,serif`;
+  ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.fillText('Play on Computer',wx(cx),wy(372));
+  ctx.restore();
+  buttons.push({x:cx-145,y:338,w:290,h:68,fn:()=>{ initEngine(); buildLevel(levelIdx); state='playing'; }});
+
+  ctx.save(); ctx.fillStyle='#907850'; ctx.font=`${ws(13)}px Georgia,serif`;
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.fillText('Mouse or touch: pull, aim, and release.',wx(cx),wy(450));
+  ctx.restore();
+}
+
+// ── 14. GAME LOOP ─────────────────────────────────────────
+let last=0;
+function loop(now){
+  requestAnimationFrame(loop);
+  const _dt=Math.min((now-last)/1000,.05); last=now;
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  ctx.save(); ctx.scale(dpr,dpr);
+
+  if(state==='menu'){ drawMenu(); ctx.restore(); return; }
+
+  if(state==='playing') Engine.update(engine,1000/60);
+
+  // Shake decay
+  if(shake.mag>0){
+    shake.x=(Math.random()-.5)*shake.mag*scale; shake.y=(Math.random()-.5)*shake.mag*scale;
+    shake.mag*=.82; if(shake.mag<.4){shake.mag=0;shake.x=0;shake.y=0;}
+  } else { shake.x=0;shake.y=0; }
+
+  // Stone trail & auto-remove
+  if(activeStone){
+    activeStone.trail=activeStone.trail||[];
+    activeStone.trail.push({x:activeStone.position.x,y:activeStone.position.y});
+    if(activeStone.trail.length>14) activeStone.trail.shift();
+    const off=activeStone.position.x>WORLD_W+120||activeStone.position.x<-120||activeStone.position.y>FLOOR_Y+110;
+    const stopped=inFlight&&Math.hypot(activeStone.velocity.x,activeStone.velocity.y)<.15;
+    if(off||(stopped&&sling==='fired')){ endFlight(); }
+  }
+
+  // Fade defeated blocks
+  for(const b of blocks) if(b.defeated&&b.alpha>0) b.alpha=Math.max(0,b.alpha-.012);
+
+  tickParticles();
+
+  // Win/loss after stone clears
+  if(state==='playing'&&!inFlight&&sling==='idle'){
+    if(checkTargets()){
+      score+=stonesLeft*200; state='levelComplete'; starAnim=0;
+    } else if(stonesLeft<=0){
+      lossDelay++; if(lossDelay>90) state='gameOver'; // wait 1.5s
+    }
+  } else if(state==='playing'&&inFlight){
+    checkTargets(); // allow defeating mid-flight
+  }
+
+  if(state==='levelComplete') starAnim+=.018;
+
+  // Render world
+  drawSky(); drawSun(); drawClouds(now); drawHills(); drawHaze();
+  for(const e of blocks) drawBlock(e);
+  drawStone(activeStone);
+  drawParticles();
+  if(state==='playing'){ drawSling(); drawArc(); drawHUD(); }
+  if(state==='levelComplete') drawLevelComplete();
+  if(state==='gameOver')      drawGameOver();
+
+  ctx.restore();
+}
+
+// ── 15. RESIZE / ORIENTATION ──────────────────────────────
+function checkOrientation(){
+  const o=document.getElementById('rotateOverlay');
+  if(window.innerHeight>window.innerWidth) o.classList.add('show');
+  else o.classList.remove('show');
+}
+document.getElementById('continueBtn').onclick=()=>document.getElementById('rotateOverlay').classList.remove('show');
+window.addEventListener('resize',()=>{ resize(); checkOrientation(); });
+window.addEventListener('orientationchange',()=>setTimeout(()=>{ resize(); checkOrientation(); if(state==='playing'){initEngine();buildLevel(levelIdx);} },320));
+document.addEventListener('touchmove',e=>e.preventDefault(),{passive:false});
+document.addEventListener('gesturestart',e=>e.preventDefault(),{passive:false});
+document.addEventListener('contextmenu',e=>e.preventDefault());
+
+// ── INIT ──────────────────────────────────────────────────
+function initClouds(){
+  clouds=[];
+  for(let i=0;i<6;i++) clouds.push({x:Math.random()*WORLD_W,y:55+Math.random()*140,r:22+Math.random()*42,spd:4+Math.random()*8});
+}
+
+resize(); checkOrientation(); initClouds(); initEngine();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
